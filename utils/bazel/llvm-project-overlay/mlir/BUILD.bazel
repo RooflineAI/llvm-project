@@ -6219,7 +6219,9 @@ cc_library(
         ":MemRefToLLVM",
         ":SPIRVDialect",
         ":Support",
+        ":TransformUtils",
         ":VectorToLLVM",
+        ":VectorTransforms",
         "//llvm:Support",
     ],
 )
