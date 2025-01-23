@@ -1188,10 +1188,32 @@ mlir::scf::tileAndFuseProducerOfSlice(
           clonedProducerOp->getResult(resultNumber));
   if (failed(tileAndFuseResult))
     return std::nullopt;
-  // Note: Do not delete the candidateSliceOp, since its passed in from the
-  // caller.
-  rewriter.replaceAllUsesWith(candidateSliceOp,
-                              tileAndFuseResult->tiledValues[0]);
+
+  // Check if the types are the same. If possible insert a cast. Fail otherwise.
+  if (tileAndFuseResult->tiledValues[0].getType() !=
+      candidateSliceOp.getResult().getType()) {
+    auto tileAndFuseResultType =
+        cast<RankedTensorType>(tileAndFuseResult->tiledValues[0].getType());
+    auto candidateSliceOpType =
+        cast<RankedTensorType>(candidateSliceOp.getResult().getType());
+    // We can only cast if the tileAndFuseResultType has a static shape and
+    // canidateSliceOp has a dynamic shape. Might be expanded in the future.
+    if (!tileAndFuseResultType.hasStaticShape() ||
+        candidateSliceOpType.hasStaticShape()) {
+      return std::nullopt;
+    }
+
+    auto castOp = rewriter.create<tensor::CastOp>(
+        candidateSliceOp->getLoc(), candidateSliceOpType, tileAndFuseResult->tiledValues[0]);
+    // Note: Do not delete the candidateSliceOp, since its passed in from the
+    // caller.
+    rewriter.replaceAllUsesWith(candidateSliceOp, castOp);
+  } else {
+    // Note: Do not delete the candidateSliceOp, since its passed in from the
+    // caller.
+    rewriter.replaceAllUsesWith(candidateSliceOp,
+                                tileAndFuseResult->tiledValues[0]);
+  }
   rewriter.eraseOp(clonedCandidateSliceOp);
   rewriter.eraseOp(clonedProducerOp);
 
