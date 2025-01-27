@@ -1007,3 +1007,165 @@ func.func @sitofp_i64_f64_vector(%a : vector<3xi64>) -> vector<3xf64> {
     %r = arith.sitofp %a : vector<3xi64> to vector<3xf64>
     return %r : vector<3xf64>
 }
+
+// CHECK-LABEL:     func @fptoui_i64_f64
+// CHECK-SAME:      ([[ARG:%.+]]: f64) -> vector<2xi32>
+// CHECK-NEXT:      [[POW:%.+]] = arith.constant 0x41F0000000000000 : f64
+// CHECK-NEXT:      [[DIV:%.+]] = arith.divf [[ARG]], [[POW]] : f64
+// CHECK-NEXT:      [[HIGHHALF:%.+]] = arith.fptoui [[DIV]] : f64 to i32
+// CHECK-NEXT:      [[REM:%.+]] = arith.remf [[ARG]], [[POW]] : f64
+// CHECK-NEXT:      [[LOWHALF:%.+]] = arith.fptoui [[REM]] : f64 to i32
+// CHECK:           %{{.+}} = vector.insert [[LOWHALF]], %{{.+}} [0]
+// CHECK-NEXT:      [[RESVEC:%.+]] = vector.insert [[HIGHHALF]], %{{.+}} [1]
+// CHECK:           return [[RESVEC]] : vector<2xi32>
+func.func @fptoui_i64_f64(%a : f64) -> i64 {
+    %r = arith.fptoui %a : f64 to i64
+    return %r : i64
+}
+
+// CHECK-LABEL:     func @fptoui_i64_f64_vector
+// CHECK-SAME:      ([[ARG:%.+]]: vector<3xf64>) -> vector<3x2xi32>
+// CHECK-NEXT:      [[POW:%.+]] = arith.constant dense<0x41F0000000000000> : vector<3xf64>
+// CHECK-NEXT:      [[DIV:%.+]] = arith.divf [[ARG]], [[POW]] : vector<3xf64>
+// CHECK-NEXT:      [[HIGHHALF:%.+]] = arith.fptoui [[DIV]] : vector<3xf64> to vector<3xi32>
+// CHECK-NEXT:      [[REM:%.+]] = arith.remf [[ARG]], [[POW]] : vector<3xf64>
+// CHECK-NEXT:      [[LOWHALF:%.+]] = arith.fptoui [[REM]] : vector<3xf64> to vector<3xi32>
+// CHECK-DAG:       [[HIGHHALFX1:%.+]] = vector.shape_cast [[HIGHHALF]] : vector<3xi32> to vector<3x1xi32>
+// CHECK-DAG:       [[LOWHALFX1:%.+]] = vector.shape_cast [[LOWHALF]] : vector<3xi32> to vector<3x1xi32>
+// CHECK:           %{{.+}} = vector.insert_strided_slice [[LOWHALFX1]], %{{.+}} {offsets = [0, 0], strides = [1, 1]}
+// CHECK-NEXT:      [[RESVEC:%.+]] = vector.insert_strided_slice [[HIGHHALFX1]], %{{.+}} {offsets = [0, 1], strides = [1, 1]}
+// CHECK:           return [[RESVEC]] : vector<3x2xi32>
+func.func @fptoui_i64_f64_vector(%a : vector<3xf64>) -> vector<3xi64> {
+    %r = arith.fptoui %a : vector<3xf64> to vector<3xi64>
+    return %r : vector<3xi64>
+}
+
+// This generates lines that are already verified by other patterns
+// We do not re-verify these and just check for the wrapper around fptoui by following its low part
+// CHECK-LABEL:     func @fptosi_i64_f64
+// CHECK-SAME:      ([[ARG:%.+]]: f64) -> vector<2xi32>
+// CHECK:           [[MAXSINT:%.+]] = arith.constant 9.2233720368547758E+18 : f64
+// CHECK:           [[ZEROCST:%.+]] = arith.constant 0.000000e+00 : f64
+// CHECK:           [[ONECST:%.+]] = arith.constant dense<[1, 0]> : vector<2xi32>
+// CHECK:           [[ALLONECST:%.+]] = arith.constant dense<-1> : vector<2xi32>
+// CHECK-NEXT:      [[ISNEGATIVE:%.+]] = arith.cmpf olt, [[ARG]], [[ZEROCST]] : f64
+// CHECK-NEXT:      [[NEGATED:%.+]] = arith.negf [[ARG]] : f64
+// CHECK-NEXT:      [[ABSVALUE:%.+]] = arith.select [[ISNEGATIVE]], [[NEGATED]], [[ARG]] : f64
+// CHECK-NEXT:      [[ISGTMAXSINT:%.+]] = arith.cmpf oge, [[ABSVALUE]], [[MAXSINT]] : f64
+// CHECK-NEXT:      [[POW:%.+]] = arith.constant 0x41F0000000000000 : f64
+// CHECK-NEXT:      [[DIV:%.+]] = arith.divf [[ABSVALUE]], [[POW]] : f64
+// CHECK-NEXT:      [[HIGHHALF:%.+]] = arith.fptoui [[DIV]] : f64 to i32
+// CHECK-NEXT:      [[REM:%.+]] = arith.remf [[ABSVALUE]], [[POW]] : f64
+// CHECK-NEXT:      [[LOWHALF:%.+]] = arith.fptoui [[REM]] : f64 to i32
+// CHECK:           vector.insert [[LOWHALF]], %{{.+}} [0] : i32 into vector<2xi32>
+// CHECK-NEXT:      [[FPTOUIRESVEC:%.+]] = vector.insert [[HIGHHALF]]
+// CHECK:           [[ALLONECSTHALF:%.+]] = vector.extract [[ALLONECST]][0] : i32 from vector<2xi32>
+// CHECK:           [[XOR:%.+]] = arith.xori %{{.+}}, [[ALLONECSTHALF]] : i32
+// CHECK-NEXT:      arith.xori
+// CHECK:           vector.insert [[XOR]]
+// CHECK-NEXT:      [[XORVEC:%.+]] = vector.insert
+// CHECK:           [[XOR:%.+]] = vector.extract [[XORVEC]][0] : i32 from vector<2xi32>
+// CHECK:           [[ONECSTHALF:%.+]] = vector.extract [[ONECST]][0] : i32 from vector<2xi32>
+// CHECK:           [[SUM:%.+]], %{{.+}} = arith.addui_extended [[XOR]], [[ONECSTHALF]] : i32, i1
+// CHECK-NEXT:      arith.extui
+// CHECK-NEXT:      arith.addi
+// CHECK-NEXT:      arith.addi
+// CHECK:           vector.insert [[SUM]]
+// CHECK-NEXT:      [[SUMVEC:%.+]] = vector.insert
+// CHECK:           [[NEGATEDRES:%.+]] = vector.extract [[SUMVEC]][0] : i32 from vector<2xi32>
+// CHECK:           [[LOWRES:%.+]] = vector.extract [[FPTOUIRESVEC]][0] : i32 from vector<2xi32>
+// CHECK:           [[ABSRES:%.+]] = arith.select [[ISNEGATIVE]], [[NEGATEDRES]], [[LOWRES]] : i32
+// CHECK-NEXT:      arith.select [[ISNEGATIVE]]
+// CHECK:           vector.insert [[ABSRES]]
+// CHECK-NEXT:      [[ABSRESVEC:%.+]] = vector.insert
+// CHECK:           [[MAXSINT:%.+]] = arith.constant dense<[-1, 2147483647]> : vector<2xi32>
+// CHECK:           [[MINSINT:%.+]] = arith.constant dense<[0, -2147483648]> : vector<2xi32>
+// CHECK-DAG:       [[MAXSINTLOW:%.+]] = vector.extract [[MAXSINT]][0] : i32 from vector<2xi32>
+// CHECK-DAG:       [[MINSINTLOW:%.+]] = vector.extract [[MINSINT]][0] : i32 from vector<2xi32>
+// CHECK:           [[MAXABSLOW:%.+]] = arith.select [[ISNEGATIVE]], [[MINSINTLOW]], [[MAXSINTLOW]] : i32
+// CHECK-NEXT:      arith.select
+// CHECK:           vector.insert [[MAXABSLOW]]
+// CHECK-NEXT:      [[MAXABSLOWVEC:%.+]] = vector.insert
+// CHECK:           [[MAXABSLOW:%.+]] = vector.extract [[MAXABSLOWVEC]][0] : i32 from vector<2xi32>
+// CHECK:           [[ABSRES:%.+]] = vector.extract [[ABSRESVEC]][0] : i32 from vector<2xi32>
+// CHECK:           [[RESULT:%.+]] = arith.select [[ISGTMAXSINT]], [[MAXABSLOW]], [[ABSRES]] : i32
+// CHECK-NEXT:      arith.select [[ISGTMAXSINT]]
+// CHECK:           vector.insert [[RESULT]]
+// CHECK-NEXT:      [[RESULTVEC:%.+]] = vector.insert
+// CHECK-NEXT:      return [[RESULTVEC]] : vector<2xi32>
+func.func @fptosi_i64_f64(%a : f64) -> i64 {
+    %r = arith.fptosi %a : f64 to i64
+    return %r : i64
+}
+
+// Same as the non-vector one, we don't re-verify
+// CHECK-LABEL:     func @fptosi_i64_f64_vector
+// CHECK-SAME:      ([[ARG:%.+]]: vector<3xf64>) -> vector<3x2xi32>
+// CHECK:           [[MAXSINT:%.+]] = arith.constant dense<9.2233720368547758E+18> : vector<3xf64>
+// CHECK-NEXT:      [[ZEROCST:%.+]] = arith.constant dense<0.000000e+00> : vector<3xf64>
+// CHECK-NEXT:      [[ONECST:%.+]] = arith.constant
+// CHECK-SAME{LITERAL} dense<[[1, 0], [1, 0], [1, 0]]> : vector<3x2xi32>
+// CHECK-NEXT:      [[ALLONECST:%.+]] = arith.constant dense<-1> : vector<3x2xi32>
+// CHECK-NEXT:      [[ISNEGATIVE:%.+]] = arith.cmpf olt, [[ARG]], [[ZEROCST]] : vector<3xf64>
+// CHECK-NEXT:      [[NEGATED:%.+]] = arith.negf [[ARG]] : vector<3xf64>
+// CHECK-NEXT:      [[ABSVALUE:%.+]] = arith.select [[ISNEGATIVE]], [[NEGATED]], [[ARG]] : vector<3xi1>, vector<3xf64>
+// CHECK-NEXT:      [[ISGTMAXSINT:%.+]] = arith.cmpf oge, [[ABSVALUE]], [[MAXSINT]] : vector<3xf64>
+// CHECK-NEXT:      [[POW:%.+]] = arith.constant dense<0x41F0000000000000> : vector<3xf64>
+// CHECK-NEXT:      [[DIV:%.+]] = arith.divf [[ABSVALUE]], [[POW]] : vector<3xf64>
+// CHECK-NEXT:      [[HIGHHALF:%.+]] = arith.fptoui [[DIV]] : vector<3xf64> to vector<3xi32>
+// CHECK-NEXT:      [[REM:%.+]] = arith.remf [[ABSVALUE]], [[POW]] : vector<3xf64>
+// CHECK-NEXT:      [[LOWHALF:%.+]] = arith.fptoui [[REM]] : vector<3xf64> to vector<3xi32>
+// CHECK-NEXT:      [[HIGHHALFX1:%.+]] = vector.shape_cast [[HIGHHALF]] : vector<3xi32> to vector<3x1xi32>
+// CHECK-NEXT:      [[LOWHALFX1:%.+]] = vector.shape_cast [[LOWHALF]] : vector<3xi32> to vector<3x1xi32>
+// CHECK:           vector.insert_strided_slice [[LOWHALFX1]], %{{.+}} {offsets = [0, 0], strides = [1, 1]} : vector<3x1xi32> into vector<3x2xi32>
+// CHECK-NEXT:      [[FPTOUIRESVEC:%.+]] = vector.insert_strided_slice [[HIGHHALFX1]]
+// CHECK:           [[ALLONECSTHALF:%.+]] = vector.extract_strided_slice [[ALLONECST]]
+// CHECK-SAME:      {offsets = [0, 0], sizes = [3, 1], strides = [1, 1]} : vector<3x2xi32> to vector<3x1xi32>
+// CHECK:           [[XOR:%.+]] = arith.xori %{{.+}}, [[ALLONECSTHALF]] : vector<3x1xi32>
+// CHECK-NEXT:      arith.xori
+// CHECK:           vector.insert_strided_slice [[XOR]]
+// CHECK-NEXT:      [[XORVEC:%.+]] = vector.insert_strided_slice
+// CHECK:           [[XOR:%.+]] = vector.extract_strided_slice [[XORVEC]]
+// CHECK-SAME:      {offsets = [0, 0], sizes = [3, 1], strides = [1, 1]} : vector<3x2xi32> to vector<3x1xi32>
+// CHECK:           [[ONECSTHALF:%.+]] = vector.extract_strided_slice [[ONECST]]
+// CHECK-SAME:      {offsets = [0, 0], sizes = [3, 1], strides = [1, 1]} : vector<3x2xi32> to vector<3x1xi32>
+// CHECK:           [[SUM:%.+]], %{{.+}} = arith.addui_extended [[XOR]], [[ONECSTHALF]] : vector<3x1xi32>, vector<3x1xi1>
+// CHECK-NEXT:      arith.extui
+// CHECK-NEXT:      arith.addi
+// CHECK-NEXT:      arith.addi
+// CHECK:           vector.insert_strided_slice [[SUM]]
+// CHECK-NEXT:      [[SUMVEC:%.+]] = vector.insert_strided_slice
+// CHECK:           [[NEGATEDRES:%.+]] = vector.extract_strided_slice [[SUMVEC]]
+// CHECK-SAME:      {offsets = [0, 0], sizes = [3, 1], strides = [1, 1]} : vector<3x2xi32> to vector<3x1xi32>
+// CHECK:           [[LOWRES:%.+]] = vector.extract_strided_slice [[FPTOUIRESVEC]]
+// CHECK-SAME:      {offsets = [0, 0], sizes = [3, 1], strides = [1, 1]} : vector<3x2xi32> to vector<3x1xi32>
+// CHECK:           [[ISNEGATIVEX1:%.+]] = vector.shape_cast [[ISNEGATIVE]] : vector<3xi1> to vector<3x1xi1>
+// CHECK:           [[ABSRES:%.+]] = arith.select [[ISNEGATIVEX1]], [[NEGATEDRES]], [[LOWRES]] : vector<3x1xi1>, vector<3x1xi32>
+// CHECK-NEXT:      arith.select [[ISNEGATIVEX1]]
+// CHECK:           vector.insert_strided_slice [[ABSRES]]
+// CHECK-NEXT:      [[ABSRESVEC:%.+]] = vector.insert_strided_slice
+// CHECK:           [[MAXSINT:%.+]] = arith.constant
+// CHECK-SAME{LITERAL}:     dense<[[-1, 2147483647], [-1, 2147483647], [-1, 2147483647]]> : vector<3x2xi32>
+// CHECK:           [[MINSINT:%.+]] = arith.constant
+// CHECK-SAME{LITERAL}:     dense<[[0, -2147483648], [0, -2147483648], [0, -2147483648]]> : vector<3x2xi32>
+// CHECK-DAG:       [[MAXSINTLOW:%.+]] = vector.extract_strided_slice [[MAXSINT]]
+// CHECK-DAG:       [[MINSINTLOW:%.+]] = vector.extract_strided_slice [[MINSINT]]
+// CHECK:           [[ISNEGATIVEX1:%.+]] = vector.shape_cast [[ISNEGATIVE]] : vector<3xi1> to vector<3x1xi1>
+// CHECK:           [[MAXABSLOW:%.+]] = arith.select [[ISNEGATIVEX1]], [[MINSINTLOW]], [[MAXSINTLOW]] : vector<3x1xi1>, vector<3x1xi32>
+// CHECK-NEXT:      arith.select [[ISNEGATIVEX1]]
+// CHECK:           vector.insert_strided_slice [[MAXABSLOW]]
+// CHECK-NEXT:      [[MAXABSLOWVEC:%.+]] = vector.insert_strided_slice
+// CHECK:           [[MAXABSLOW:%.+]] = vector.extract_strided_slice [[MAXABSLOWVEC]]
+// CHECK-SAME:      {offsets = [0, 0], sizes = [3, 1], strides = [1, 1]} : vector<3x2xi32> to vector<3x1xi32>
+// CHECK:           [[ABSRES:%.+]] = vector.extract_strided_slice [[ABSRESVEC]]
+// CHECK-SAME:      {offsets = [0, 0], sizes = [3, 1], strides = [1, 1]} : vector<3x2xi32> to vector<3x1xi32>
+// CHECK:           [[ISGTMAXSINTX1:%.+]] = vector.shape_cast [[ISGTMAXSINT]] : vector<3xi1> to vector<3x1xi1>
+// CHECK:           [[RESULT:%.+]] = arith.select [[ISGTMAXSINTX1]], [[MAXABSLOW]], [[ABSRES]] : vector<3x1xi1>, vector<3x1xi32>
+// CHECK-NEXT:      arith.select [[ISGTMAXSINTX1]]
+// CHECK:           vector.insert_strided_slice [[RESULT]]
+// CHECK-NEXT:      [[RESULTVEC:%.+]] = vector.insert_strided_slice
+// CHECK-NEXT:      return [[RESULTVEC]] : vector<3x2xi32>
+func.func @fptosi_i64_f64_vector(%a : vector<3xf64>) -> vector<3xi64> {
+    %r = arith.fptosi %a : vector<3xf64> to vector<3xi64>
+    return %r : vector<3xi64>
+}
