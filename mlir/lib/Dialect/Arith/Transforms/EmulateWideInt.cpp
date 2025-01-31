@@ -975,6 +975,134 @@ struct ConvertUIToFP final : OpConversionPattern<arith::UIToFPOp> {
 };
 
 //===----------------------------------------------------------------------===//
+// ConvertFPToUI
+//===----------------------------------------------------------------------===//
+
+struct ConvertFPToUI final : OpConversionPattern<arith::FPToUIOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(arith::FPToUIOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    /* Get the input float type */
+    auto inFp = adaptor.getIn();
+    auto fpTy = inFp.getType();
+    auto fpElemTy = dyn_cast<FloatType>(getElementTypeOrSelf(inFp));
+    /* Get the significand/mantissa width of the input float type */
+    auto floatWidth = fpElemTy.getWidth();
+    /* Subtract the implicit bit from the mantissa width */
+    auto mantissaWidth = fpElemTy.getFPMantissaWidth() - 1;
+    auto expWidth = floatWidth - mantissaWidth - 1;
+
+    Type intTy = op.getType();
+    auto newTy = getTypeConverter()->convertType<VectorType>(intTy);
+    if (!newTy)
+      return rewriter.notifyMatchFailure(
+          loc, llvm::formatv("unsupported type: {0}", intTy));
+    unsigned newBitWidth = newTy.getElementTypeBitWidth();
+    /*
+    We emulate the cast in 2 steps:
+      1) Calculate the high part:
+        We divide the floating point number by the bitwidth of the representable
+    int by subtracting the bitwidth from the exponent of the float. The
+    resulting fp gives the high part of the integer with fptoui. expHi is the
+    exponent of the high part. 2) Calculate the low part: Since we definitely
+    need a bitcast to integer over here, we don't just divide the float for the
+    high part, but already work on the bitcast itself. For the low part, one
+    calculates the expLo, the exponent to work with for the lower part. expLo =
+    min( max( expHi, BW - 1 ), expFp ). Each result of expLo can result in one
+    of the three cases:
+
+    i. The fp fits the new bitwidth. (fp  < 2^BW) -> expFp
+    ii. The fp fits the old bitwidth but not the new one. ( 2^BW <= fp < 2^2BW)
+    -> intBidwidth - 1 iii. The fp does not fit the old bitwidth. (fp >= 2^2BW)
+    -> expHi
+
+    The exponent of the original fp gets replaced with expLo and the result is
+    handed to fptoui. After this, the result from fptoui should be shifted left
+    by expHi + 1 if case ii occurs.
+    */
+
+    /* Bitcast the float to unsigned integer */
+    Type fpInUiTy = IntegerType::get(inFp.getContext(), floatWidth);
+    if (auto vecTy = dyn_cast<VectorType>(fpTy))
+      fpInUiTy = VectorType::get(vecTy.getShape(), fpInUiTy);
+    Value fpInUi = rewriter.create<arith::BitcastOp>(loc, fpInUiTy, inFp);
+
+    /* Construct the intBidWidth to subtract from the exponent */
+    auto bitWidthVal = newBitWidth << mantissaWidth;
+    Value intBWExp =
+        createScalarOrSplatConstant(rewriter, loc, fpInUiTy, bitWidthVal);
+    /* Subtract intBitWidth from the exponent of the floating point */
+    Value fpHi = rewriter.create<arith::SubIOp>(loc, fpInUi, intBWExp);
+    /* Calculate the high part of the result int vector */
+    Value resHiFp = rewriter.create<arith::BitcastOp>(loc, fpTy, fpHi);
+    Type resHalfType = IntegerType::get(resHiFp.getContext(), newBitWidth);
+    if (auto vecTy = dyn_cast<VectorType>(fpTy))
+      resHalfType = VectorType::get(vecTy.getShape(), resHalfType);
+    Value resHi = rewriter.create<arith::FPToUIOp>(loc, resHalfType, resHiFp);
+
+    /* Extract the exponent of the float */
+    auto expMask = ((uint64_t(1) << expWidth) - 1u) << mantissaWidth;
+    Value expMaskVal =
+        createScalarOrSplatConstant(rewriter, loc, fpInUiTy, expMask);
+    Value expFp = rewriter.create<arith::AndIOp>(loc, fpInUi, expMaskVal);
+    Value expHi = rewriter.create<arith::AndIOp>(loc, fpHi, expMaskVal);
+    /* Construct intBWM1Val + expBias */
+    auto expBias = (uint64_t(1) << (expWidth - 1u)) - 1u;
+    auto intBWM1 = bitWidthVal + ((expBias - uint64_t(1)) << mantissaWidth);
+    /* Calculate expLo = min( max( expHi, intBitWidth - 1 ), expFp ) */
+    Value intBWM1Val =
+        createScalarOrSplatConstant(rewriter, loc, fpInUiTy, intBWM1);
+    Value expLo =
+        rewriter.create<arith::MaxUIOp>(loc, expHi, intBWM1Val); // reusable 1
+    expLo = rewriter.create<arith::MinUIOp>(loc, expLo, expFp);
+
+    /* Construct mask to null out the exponent */
+    auto expMaskNeg = ~expMask;
+    Value expMaskNegVal = createScalarOrSplatConstant(
+        rewriter, loc, fpInUiTy, static_cast<uint32_t>(expMaskNeg));
+    /* Replace the exponent of fpInUi with expLo  and emit fptoui */
+    Value loBeforeShift =
+        rewriter.create<arith::AndIOp>(loc, fpInUi, expMaskNegVal);
+    loBeforeShift = rewriter.create<arith::AddIOp>(loc, loBeforeShift, expLo);
+    loBeforeShift = rewriter.create<arith::BitcastOp>(loc, fpTy, loBeforeShift);
+    loBeforeShift =
+        rewriter.create<arith::FPToUIOp>(loc, resHalfType, loBeforeShift);
+
+    /* Construct expHi + 1 by shifting right from the exp field and subtracting
+     * exp bias - 1 from the shift amount for lo */
+    Value expBiasVal = createScalarOrSplatConstant(
+        rewriter, loc, fpInUiTy, static_cast<uint64_t>(expBias - 1u));
+    Value rightShiftVal =
+        createScalarOrSplatConstant(rewriter, loc, fpInUiTy, mantissaWidth);
+    Value expHiP1 = rewriter.create<arith::ShRUIOp>(loc, expHi, rightShiftVal);
+    expHiP1 = rewriter.create<arith::SubIOp>(loc, expHiP1, expBiasVal);
+    /* Shift the loBeforeShift left by expHi + 1 or 0 bits depending on if 0 <=
+     * expHi + 1 < 32 */
+    Value overflow = rewriter.create<arith::CmpIOp>(
+        loc, arith::CmpIPredicate::ult, expHi, intBWM1Val); // reusable 1
+    Value zeroCst = createScalarOrSplatConstant(rewriter, loc, fpInUiTy, 0);
+    Value lt1 = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt,
+                                               expHiP1, zeroCst);
+    Value shouldShift = rewriter.create<arith::AndIOp>(loc, overflow, lt1);
+    Value shiftAmount =
+        rewriter.create<arith::SelectOp>(loc, shouldShift, expHiP1, zeroCst);
+    Value resLo =
+        rewriter.create<arith::ShLIOp>(loc, loBeforeShift, shiftAmount);
+
+    /* Construct the result vector */
+    auto hi = appendX1Dim(rewriter, loc, resHi);
+    auto lo = appendX1Dim(rewriter, loc, resLo);
+    Value resultVec = constructResultVector(rewriter, loc, newTy, {hi, lo});
+    rewriter.replaceOp(op, resultVec);
+
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // ConvertTruncI
 //===----------------------------------------------------------------------===//
 
@@ -1150,5 +1278,5 @@ void arith::populateArithWideIntEmulationPatterns(
       ConvertIndexCastIntToIndex<arith::IndexCastUIOp>,
       ConvertIndexCastIndexToInt<arith::IndexCastOp, arith::ExtSIOp>,
       ConvertIndexCastIndexToInt<arith::IndexCastUIOp, arith::ExtUIOp>,
-      ConvertSIToFP, ConvertUIToFP>(typeConverter, patterns.getContext());
+      ConvertSIToFP, ConvertUIToFP, ConvertFPToUI>(typeConverter, patterns.getContext());
 }
