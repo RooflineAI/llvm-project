@@ -975,6 +975,145 @@ struct ConvertUIToFP final : OpConversionPattern<arith::UIToFPOp> {
 };
 
 //===----------------------------------------------------------------------===//
+// ConvertFPToSI
+//===----------------------------------------------------------------------===//
+
+struct ConvertFPToSI final : OpConversionPattern<arith::FPToSIOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(arith::FPToSIOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    /* Get the input float type */
+    auto inFp = adaptor.getIn();
+    auto fpTy = inFp.getType();
+    auto fpElemTy = getElementTypeOrSelf(fpTy);
+
+    Type intTy = op.getType();
+    unsigned oldBitWidth = getElementTypeOrSelf(intTy).getIntOrFloatBitWidth();
+
+    auto newTy = getTypeConverter()->convertType<VectorType>(intTy);
+    if (!newTy)
+      return rewriter.notifyMatchFailure(
+          loc, llvm::formatv("unsupported type: {0}", intTy));
+
+    /*
+    Work on the absolute value and then convert the result to signed integer.
+    Defer absolute value to fptoui, if minSInt < fp < maxSInt, i.e.
+    greatest/smallest signed integer. Else, emit the greatest/smallest integer
+    constant and handle the sign.
+    */
+    auto maxSInt = APInt::getSignedMaxValue(oldBitWidth);
+    auto minSInt = APInt::getSignedMinValue(oldBitWidth);
+
+    TypedAttr maxSIntAttr =
+        rewriter.getFloatAttr(fpElemTy, maxSInt.signedRoundToDouble());
+    TypedAttr zeroAttr = rewriter.getFloatAttr(fpElemTy, 0.0);
+
+    if (auto vecTy = dyn_cast<VectorType>(fpTy)) {
+      maxSIntAttr = SplatElementsAttr::get(vecTy, maxSIntAttr);
+      zeroAttr = SplatElementsAttr::get(vecTy, zeroAttr);
+    }
+
+    Value maxSIntFp = rewriter.create<arith::ConstantOp>(loc, maxSIntAttr);
+    Value zeroCst = rewriter.create<arith::ConstantOp>(loc, zeroAttr);
+
+    Value oneCst = createScalarOrSplatConstant(rewriter, loc, intTy, 1);
+    Value allOnesCst = createScalarOrSplatConstant(
+        rewriter, loc, intTy, APInt::getAllOnes(oldBitWidth));
+
+    /* Get the absolute value */
+    Value isNeg = rewriter.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OLT,
+                                                 inFp, zeroCst);
+    Value negInFp = rewriter.create<arith::NegFOp>(loc, inFp);
+
+    Value absVal = rewriter.create<arith::SelectOp>(loc, isNeg, negInFp, inFp);
+
+    /* Check if abs(fp) >= maxSignedInt + 1 */
+    Value isGtMaxSI = rewriter.create<arith::CmpFOp>(
+        loc, arith::CmpFPredicate::OGE, absVal, maxSIntFp);
+
+    /* Defer the absolute value to fptoui */
+    Value res = rewriter.create<arith::FPToUIOp>(loc, intTy, absVal);
+
+    /* Negate the value if < 0 */
+    Value bitwiseNeg = rewriter.create<arith::XOrIOp>(loc, res, allOnesCst);
+    Value neg = rewriter.create<arith::AddIOp>(loc, bitwiseNeg, oneCst);
+    res = rewriter.create<arith::SelectOp>(loc, isNeg, neg, res);
+
+    /* Return the max/min signed int for greater values */
+    Value maxSIntCst =
+        createScalarOrSplatConstant(rewriter, loc, intTy, maxSInt);
+    Value minSIntCst =
+        createScalarOrSplatConstant(rewriter, loc, intTy, minSInt);
+    Value resCst =
+        rewriter.create<arith::SelectOp>(loc, isNeg, minSIntCst, maxSIntCst);
+
+    rewriter.replaceOpWithNewOp<arith::SelectOp>(op, isGtMaxSI, resCst, res);
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// ConvertFPToUI
+//===----------------------------------------------------------------------===//
+
+struct ConvertFPToUI final : OpConversionPattern<arith::FPToUIOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(arith::FPToUIOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    /* Get the input float type */
+    auto inFp = adaptor.getIn();
+    auto fpTy = inFp.getType();
+
+    Type intTy = op.getType();
+    auto newTy = getTypeConverter()->convertType<VectorType>(intTy);
+    if (!newTy)
+      return rewriter.notifyMatchFailure(
+          loc, llvm::formatv("unsupported type: {0}", intTy));
+    unsigned newBitWidth = newTy.getElementTypeBitWidth();
+    Type newHalfType = IntegerType::get(inFp.getContext(), newBitWidth);
+    if (auto vecType = dyn_cast<VectorType>(fpTy))
+      newHalfType = VectorType::get(vecType.getShape(), newHalfType);
+    /*
+    The resulting integer has the upper part and the lower part.
+    This would be interpreted as 2^N * high + low, where N is the bitwidth.
+    Therefore, to calculate the higher part, we emit resHigh = fptoui(fp/2^N).
+    For the lower part, we emit fptoui(fp - resHigh * 2^N).
+    */
+    double powBitwidth = (uint64_t(1) << newBitWidth);
+    TypedAttr powBitwidthAttr =
+        FloatAttr::get(getElementTypeOrSelf(fpTy), powBitwidth);
+    if (auto vecType = dyn_cast<VectorType>(fpTy))
+      powBitwidthAttr = SplatElementsAttr::get(vecType, powBitwidthAttr);
+    Value powBitwidthFloatCst =
+        rewriter.create<arith::ConstantOp>(loc, powBitwidthAttr);
+
+    Value fpDivPowBitwidth =
+        rewriter.create<arith::DivFOp>(loc, inFp, powBitwidthFloatCst);
+    Value resHigh =
+        rewriter.create<arith::FPToUIOp>(loc, newHalfType, fpDivPowBitwidth);
+    // Calculate fp - resHigh * 2^N by getting the remainder of the division
+    Value remainder =
+        rewriter.create<arith::RemFOp>(loc, inFp, powBitwidthFloatCst);
+    Value resLow =
+        rewriter.create<arith::FPToUIOp>(loc, newHalfType, remainder);
+
+    auto high = appendX1Dim(rewriter, loc, resHigh);
+    auto low = appendX1Dim(rewriter, loc, resLow);
+
+    auto resultVec = constructResultVector(rewriter, loc, newTy, {low, high});
+
+    rewriter.replaceOp(op, resultVec);
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // ConvertTruncI
 //===----------------------------------------------------------------------===//
 
@@ -1150,5 +1289,6 @@ void arith::populateArithWideIntEmulationPatterns(
       ConvertIndexCastIntToIndex<arith::IndexCastUIOp>,
       ConvertIndexCastIndexToInt<arith::IndexCastOp, arith::ExtSIOp>,
       ConvertIndexCastIndexToInt<arith::IndexCastUIOp, arith::ExtUIOp>,
-      ConvertSIToFP, ConvertUIToFP>(typeConverter, patterns.getContext());
+      ConvertSIToFP, ConvertUIToFP, ConvertFPToUI, ConvertFPToSI>(
+      typeConverter, patterns.getContext());
 }
