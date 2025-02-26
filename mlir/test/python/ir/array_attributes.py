@@ -6,6 +6,7 @@ import gc
 from mlir.ir import *
 import numpy as np
 import weakref
+import ctypes
 
 
 def run(f):
@@ -617,3 +618,111 @@ def testGetDenseResourceElementsAttr():
     # CHECK: BACKING MEMORY DELETED
     # CHECK: EXIT FUNCTION
     print("EXIT FUNCTION")
+
+
+# CHECK-LABEL: TEST: testGetDenseResourceElementsAttrNdarrayI32
+@run
+def testGetDenseResourceElementsAttrNdarrayI32():
+    class DLPackWrapper:
+        def __init__(self, array: np.ndarray):
+            self.dlpack_capsule = array.__dlpack__()
+    
+        def __del__(self):
+            print("DLPACK MEMORY DELETED")
+
+        def get_capsule(self):
+            return self.dlpack_capsule
+
+    context = Context()
+    mview_int32 = DLPackWrapper(np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int32))
+
+    def test_attribute_int32(context, mview_int32):
+        with context, Location.unknown():
+            element_type = IntegerType.get_signless(32)
+            tensor_type = RankedTensorType.get((2, 3), element_type)
+            resource = DenseResourceElementsAttr.get_from_ndarray(
+                mview_int32.get_capsule(), "from_py", tensor_type
+            )
+            module = Module.parse("module {}")
+            module.operation.attributes["test.resource"] = resource
+            # CHECK: test.resource = dense_resource<from_py> : tensor<2x3xi32>
+            # CHECK: from_py: "0x01000000010000000200000003000000040000000500000006000000"
+            print(module)
+
+            # Verifies type casting.
+            # CHECK: dense_resource<from_py> : tensor<2x3xi32>
+            print(
+                DenseResourceElementsAttr(module.operation.attributes["test.resource"])
+            )
+
+    test_attribute_int32(context, mview_int32)
+    del mview_int32
+    gc.collect()
+    # CHECK: DLPACK MEMORY DELETED
+    # CHECK: FREEING CONTEXT
+    print("FREEING CONTEXT")
+    context = None
+    gc.collect()
+    # CHECK: EXIT FUNCTION
+    print("EXIT FUNCTION")
+
+
+# CHECK-LABEL: TEST: testGetDenseResourceElementsAttrNdarrayF32
+@run
+def testGetDenseResourceElementsAttrNdarrayF32():
+    class DLPackWrapper:
+        def __init__(self, array: np.ndarray):
+            self.dlpack_capsule = array.__dlpack__()
+
+        def __del__(self):
+            print("DLPACK MEMORY DELETED")
+
+        def get_capsule(self):
+            return self.dlpack_capsule
+
+    context = Context()
+    mview_float32 = DLPackWrapper(np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32))
+
+    def test_attribute_float32(context, mview_float32):
+        with context, Location.unknown():
+            element_type = FloatAttr.get_f32(32.0)
+            tensor_type = RankedTensorType.get((2, 3), element_type.type)
+            resource = DenseResourceElementsAttr.get_from_ndarray(
+                mview_float32.get_capsule(), "from_py", tensor_type
+            )
+            module = Module.parse("module {}")
+            module.operation.attributes["test.resource"] = resource
+            # CHECK: test.resource = dense_resource<from_py> : tensor<2x3xf32>
+            # CHECK: from_py: "0x010000000000803F0000004000004040000080400000A0400000C040"
+            print(module)
+
+            # Verifies type casting.
+            # CHECK: dense_resource<from_py> : tensor<2x3xf32>
+            print(
+                DenseResourceElementsAttr(module.operation.attributes["test.resource"])
+            )
+
+    test_attribute_float32(context, mview_float32)
+    del mview_float32
+    gc.collect()
+    # CHECK: DLPACK MEMORY DELETED
+    # CHECK: FREEING CONTEXT
+    print("FREEING CONTEXT")
+    context = None
+    gc.collect()
+    # CHECK: EXIT FUNCTION
+    print("EXIT FUNCTION")
+
+
+# CHECK-LABEL: TEST: testGetDenseResourceElementsAttrNonShapedType
+@run
+def testGetDenseResourceElementsAttrNonShapedType():
+    with Context(), Location.unknown():
+        mview = np.array([1], dtype=np.int32).__dlpack__()
+        t = F32Type.get()
+
+        try:
+            attr = DenseResourceElementsAttr.get_from_ndarray(mview, "from_py", t)
+        except ValueError as e:
+            # CHECK: Constructing a DenseResourceElementsAttr requires a ShapedType.
+            print(e)

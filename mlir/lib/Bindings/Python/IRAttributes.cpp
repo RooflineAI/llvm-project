@@ -6,7 +6,9 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -18,6 +20,9 @@
 #include "mlir-c/BuiltinTypes.h"
 #include "mlir/Bindings/Python/NanobindAdaptors.h"
 #include "mlir/Bindings/Python/Nanobind.h"
+#include "nanobind/nanobind.h"
+#include "nanobind/ndarray.h"
+#include "pytypedefs.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -1494,6 +1499,58 @@ public:
     return PyDenseResourceElementsAttribute(contextWrapper->getRef(), attr);
   }
 
+  static PyDenseResourceElementsAttribute
+  getFromNdarray(const nb::ndarray<nb::any_contig> &buffer, const std::string &name, const PyType &type,
+                std::optional<size_t> alignment, bool isMutable,
+                DefaultingPyMlirContext contextWrapper) {
+    if (!mlirTypeIsAShaped(type)) {
+      throw std::invalid_argument(
+          "Constructing a DenseResourceElementsAttr requires a ShapedType.");
+    }
+      
+    // Do not request any conversions as we must ensure to use caller
+    // managed memory.
+    std::unique_ptr<nb::ndarray<nb::any_contig>> view = std::make_unique<nb::ndarray<nb::any_contig>>(buffer);
+    if (!view->is_valid()) {
+      throw std::invalid_argument("The buffer should not be a nullptr.");
+    }
+
+    // This scope releaser will only release if we haven't yet transferred
+    // ownership.
+    auto freeBuffer = llvm::make_scope_exit([&]() {
+      if (view)
+        view.release();
+    });
+
+    // Infer alignment to be the stride of one element if not explicit.
+    size_t inferredAlignment;
+    if (alignment)
+      inferredAlignment = *alignment;
+    else
+      inferredAlignment = view->stride_ptr()[view->ndim() - 1];
+
+    // The userData is a nb::ndarray<nb::any_contig>* that the deleter owns.
+    auto deleter = [](void *userData, const void *data, size_t size,
+        size_t align) {
+      nb::ndarray<nb::any_contig> *ownedView= static_cast<nb::ndarray<nb::any_contig> *>(userData);
+      delete ownedView;
+    };
+
+    size_t rawBufferSize = view->size() * view->itemsize();
+    MlirAttribute attr = mlirUnmanagedDenseResourceElementsAttrGet(
+        type, toMlirStringRef(name), view->data(), rawBufferSize,
+        inferredAlignment, isMutable, deleter, static_cast<void *>(view.get()));
+    if (mlirAttributeIsNull(attr)) {
+      throw std::invalid_argument(
+          "DenseResourceElementsAttr could not be constructed from the given "
+          "buffer. "
+          "This may mean that the Python buffer layout does not match that "
+          "MLIR expected layout and is a bug.");
+    }
+    view.release();
+    return PyDenseResourceElementsAttribute(contextWrapper->getRef(), attr);
+  }
+
   static void bindDerived(ClassTy &c) {
     c.def_static(
         "get_from_buffer", PyDenseResourceElementsAttribute::getFromBuffer,
@@ -1501,7 +1558,13 @@ public:
         nb::arg("alignment").none() = nb::none(), nb::arg("is_mutable") = false,
         nb::arg("context").none() = nb::none(),
         kDenseResourceElementsAttrGetFromBufferDocstring);
-  }
+    c.def_static(
+        "get_from_ndarray", PyDenseResourceElementsAttribute::getFromNdarray,
+        nb::arg("array"), nb::arg("name"), nb::arg("type"),
+        nb::arg("alignment").none() = nb::none(), nb::arg("is_mutable") = false,
+        nb::arg("context").none() = nb::none(),
+        kDenseResourceElementsAttrGetFromBufferDocstring);
+      }
 };
 
 class PyDictAttribute : public PyConcreteAttribute<PyDictAttribute> {

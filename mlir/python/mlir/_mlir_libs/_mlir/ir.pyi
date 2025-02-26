@@ -179,6 +179,9 @@ else:
     class Buffer(abc.ABC):
         pass
 
+class DLPack(abc.ABC):
+    pass
+
 class _OperationBase:
     @overload
     def __eq__(self, arg0: _OperationBase) -> bool: ...
@@ -1345,6 +1348,41 @@ class DenseResourceElementsAttr(Attribute):
 
         Args:
           buffer: The array or buffer to convert.
+          name: Name to provide to the resource (may be changed upon collision).
+          type: The explicit ShapedType to construct the attribute with.
+          context: Explicit context, if not from context manager.
+
+        Returns:
+          DenseResourceElementsAttr on success.
+
+        Raises:
+          ValueError: If the type of the buffer or array cannot be matched to an MLIR
+            type or if the buffer does not meet expectations.
+        """
+    @staticmethod
+    def get_from_ndarray(
+        array: DLPack,
+        name: str,
+        type: Type,
+        alignment: int | None = None,
+        is_mutable: bool = False,
+        context: Context | None = None,
+    ) -> DenseResourceElementsAttr:
+        """
+        Gets a DenseResourceElementsAttr from a Python buffer or DLPack C structure
+        wrapped in a PyCapsule.
+
+        This function does minimal validation or massaging of the data, and it is
+        up to the caller to ensure that the buffer meets the characteristics
+        implied by the shape.
+
+        The DLPack data structure and any user objects will be retained over the lifetime
+        of the resource blob. The used nanobind ndarray is designed as a view of the memory
+        and any copy of this wrapper will point to the same underlying buffer 
+        and will only increase the reference count until it goes out of scope.
+
+        Args:
+          array: The buffer or DLPack to convert.
           name: Name to provide to the resource (may be changed upon collision).
           type: The explicit ShapedType to construct the attribute with.
           context: Explicit context, if not from context manager.
