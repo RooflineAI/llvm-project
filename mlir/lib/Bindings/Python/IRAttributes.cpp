@@ -1527,7 +1527,7 @@ public:
     if (alignment)
       inferredAlignment = *alignment;
     else
-      inferredAlignment = view->stride_ptr()[view->ndim() - 1];
+      inferredAlignment = static_cast<size_t>(view->stride(view->ndim() - 1) * view->itemsize());
 
     // The userData is a nb::ndarray<nb::any_contig>* that the deleter owns.
     auto deleter = [](void *userData, const void *data, size_t size,

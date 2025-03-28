@@ -646,7 +646,7 @@ def testGetDenseResourceElementsAttrNdarrayI32():
             module = Module.parse("module {}")
             module.operation.attributes["test.resource"] = resource
             # CHECK: test.resource = dense_resource<from_py> : tensor<2x3xi32>
-            # CHECK: from_py: "0x01000000010000000200000003000000040000000500000006000000"
+            # CHECK: from_py: "0x04000000010000000200000003000000040000000500000006000000"
             print(module)
 
             # Verifies type casting.
@@ -693,7 +693,7 @@ def testGetDenseResourceElementsAttrNdarrayF32():
             module = Module.parse("module {}")
             module.operation.attributes["test.resource"] = resource
             # CHECK: test.resource = dense_resource<from_py> : tensor<2x3xf32>
-            # CHECK: from_py: "0x010000000000803F0000004000004040000080400000A0400000C040"
+            # CHECK: from_py: "0x040000000000803F0000004000004040000080400000A0400000C040"
             print(module)
 
             # Verifies type casting.
