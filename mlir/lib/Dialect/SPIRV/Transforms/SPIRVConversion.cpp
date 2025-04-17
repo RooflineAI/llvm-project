@@ -391,6 +391,14 @@ convertVectorType(const spirv::TargetEnv &targetEnv,
 
   auto elementType =
       convertScalarType(targetEnv, options, scalarType, storageClass);
+  /*if (elementType && (elementType.getIntOrFloatBitWidth() > scalarType.getIntOrFloatBitWidth())){*/
+  /*  auto divisor = elementType.getIntOrFloatBitWidth() / scalarType.getIntOrFloatBitWidth();*/
+  /*  auto newShape = llvm::to_vector(type.getShape());*/
+  /*  newShape.back() = newShape.back() / divisor;*/
+  /*  auto resType = VectorType::get(newShape, elementType);*/
+  /*  llvm::errs() << resType << "\n";*/
+  /*  return resType;*/
+  /*}*/
   if (elementType)
     return VectorType::get(type.getShape(), elementType);
   return nullptr;

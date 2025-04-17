@@ -75,9 +75,21 @@ getTargetShape(const vector::UnrollVectorOptions &options, Operation *op) {
     LDBG("--no filter constraint -> BAIL");
     return std::nullopt;
   }
+  if (op->getNumResults() == 0) {
+    LDBG("--op does not have results -> BAIL");
+    return std::nullopt;
+  }
   assert(options.nativeShape &&
          "vector unrolling expects the native shape or native"
          "shape call back function to be set");
+  if (!dyn_cast<VectorType>(op->getResult(0).getType())) {
+    LDBG("--op has not a vector type -> BAIL");
+    return std::nullopt;
+  }
+  if (dyn_cast<VectorType>(op->getResult(0).getType()).getShape().empty()) {
+    LDBG("--op has empty shape -> BAIL");
+    return std::nullopt;
+  }
   auto unrollableVectorOp = dyn_cast<VectorUnrollOpInterface>(op);
   if (!unrollableVectorOp) {
     LDBG("--not an unrollable op -> BAIL");
