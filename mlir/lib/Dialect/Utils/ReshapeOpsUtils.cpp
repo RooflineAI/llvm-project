@@ -38,68 +38,121 @@ mlir::getReassociationIndicesForCollapse(ArrayRef<int64_t> sourceShape,
   SmallVector<ReassociationIndices, 4> reassociationMap;
   reassociationMap.reserve(numTargetDims);
 
-  unsigned sourceDim = 0, targetDim = 0;
-  for (; targetDim < numTargetDims; ++targetDim) {
-    int64_t currTargetShape = targetShape[targetDim];
-    ReassociationIndices currIndices;
-    // 1. Target dimension is dynamic. Source shape should contain at least
-    // one dynamic dimension.
-    if (currTargetShape == ShapedType::kDynamic) {
-      // FIXME: We stop the search with the first dynamic dimension, while in
-      // fact, we can have a valid pattern like 2x?x?x4x8 -> ?x4x8. It becomes
-      // indeterministic altogether when we have neighboring dynamic dimensions
-      // in the target shape. Most of these patterns will be safely rejected,
-      // however we might achieve more correct folds by taking affine
-      // expressions into account, if these can be passed on by the call sites.
-      bool foundDynamic = false;
-      while (sourceDim < numSourceDims) {
-        currIndices.push_back(sourceDim);
-        if (sourceShape[sourceDim++] == ShapedType::kDynamic) {
-          foundDynamic = true;
-          break;
-        }
-      }
-      if (!foundDynamic)
-        return std::nullopt;
-
-      reassociationMap.push_back(currIndices);
-      continue;
-    }
-    // 2. Target dimension is static. The product of dimensions of the expanded
-    // shape should match the collapsed dimension shape.
+  unsigned sourceDimIdx = 0, targetDimIdx = 0;
+  // Source dimensions iteration logic for static target dimensions.
+  // FIXME: Instead of lambda-capturing this function's source shape index "in
+  // place", consider refactoring this into a separate function.
+  auto collectSourceIndicesForStaticTargetDim =
+      [&](int64_t targetShape,
+          bool mayHaveOffset = false) -> FailureOr<ReassociationIndices> {
+    ReassociationIndices resultIndices;
     int64_t prodOfCollapsedDims = 1;
     bool reachedTargetDimSize = false;
-    while (sourceDim < numSourceDims) {
+    for (; sourceDimIdx < numSourceDims; ++sourceDimIdx) {
       // Source shape cannot be dynamic if the target dim is static.
-      if (sourceShape[sourceDim] == ShapedType::kDynamic)
-        return std::nullopt;
-      prodOfCollapsedDims *= sourceShape[sourceDim];
-      if (prodOfCollapsedDims > currTargetShape)
-        break;
-      else if (prodOfCollapsedDims == currTargetShape) {
-        currIndices.push_back(sourceDim++);
+      if (sourceShape[sourceDimIdx] == ShapedType::kDynamic)
+        return failure();
+      prodOfCollapsedDims *= sourceShape[sourceDimIdx];
+      resultIndices.push_back(sourceDimIdx);
+      if (prodOfCollapsedDims > targetShape && !mayHaveOffset)
+        return failure();
+      while (prodOfCollapsedDims > targetShape) {
+        assert(!resultIndices.empty());
+        auto frontOffsetIdx = resultIndices.begin();
+        prodOfCollapsedDims /= sourceShape[*frontOffsetIdx];
+        resultIndices.erase(frontOffsetIdx);
+      }
+      if (prodOfCollapsedDims == targetShape) {
         reachedTargetDimSize = true;
+        ++sourceDimIdx;
         break;
-      } else // prodOfCollapsedDims < currTargetShape
-        currIndices.push_back(sourceDim++);
+      }
     }
     if (!reachedTargetDimSize)
+      return failure();
+    return resultIndices;
+  };
+  // Source dimensions iteration logic for dynamic target dimensions.
+  // FIXME: Instead of lambda-capturing this function's source shape index "in
+  // place", consider refactoring this into a separate function.
+  auto collectSourceIndicesForDynamicTargetDim =
+      [&](bool allowStaticNonOnes,
+          bool mapConsecutiveDynDims) -> FailureOr<ReassociationIndices> {
+    ReassociationIndices resultIndices;
+    bool foundFirstDynamic = false;
+    while (sourceDimIdx < numSourceDims) {
+      if (sourceShape[sourceDimIdx] == ShapedType::kDynamic) {
+        if (foundFirstDynamic && !mapConsecutiveDynDims)
+          break;
+        foundFirstDynamic |= true;
+      } else {
+        if (foundFirstDynamic)
+          break;
+        else if (sourceShape[sourceDimIdx] > 1 && !allowStaticNonOnes)
+          return failure();
+      }
+      resultIndices.push_back(sourceDimIdx++);
+    }
+    if (!foundFirstDynamic)
+      return failure();
+    return resultIndices;
+  };
+  // Iterate over target shape.
+  bool wasLastDimDynamic = false;
+  for (; targetDimIdx < numTargetDims; ++targetDimIdx) {
+    int64_t currTargetShape = targetShape[targetDimIdx];
+    if (currTargetShape != ShapedType::kDynamic) {
+      unsigned sourceDimAtStart = sourceDimIdx;
+      auto indices = collectSourceIndicesForStaticTargetDim(
+          currTargetShape, /*mayHaveOffset=*/wasLastDimDynamic);
+      if (failed(indices))
+        return std::nullopt;
+      if (wasLastDimDynamic) {
+        assert(!reassociationMap.empty());
+        auto &previousIndices = reassociationMap.back();
+        for (; sourceDimAtStart < indices->front(); ++sourceDimAtStart)
+          previousIndices.push_back(sourceDimAtStart);
+      }
+      reassociationMap.push_back(*indices);
+      wasLastDimDynamic = false;
+      continue;
+    }
+
+    bool isNextDimDynamic =
+        targetDimIdx + 1 < numTargetDims &&
+        targetShape[targetDimIdx + 1] == ShapedType::kDynamic;
+    auto indices = collectSourceIndicesForDynamicTargetDim(
+        /*allowStaticNonOnes=*/!wasLastDimDynamic,
+        /*mapConsecutiveDynDims=*/!wasLastDimDynamic && !isNextDimDynamic);
+    if (failed(indices))
       return std::nullopt;
-    reassociationMap.push_back(currIndices);
+    reassociationMap.push_back(*indices);
+    wasLastDimDynamic = true;
   }
   // Now that we've mapped all the target dimensions, process any remaining
-  // entries in the source shape explicitly. Either the last target dimension
-  // is dynamic, or all remaining source entries need to be 1 or dynamic. Same
-  // applies when target shape is empty (can be the case for subshape
-  // reassociations).
-  for (; sourceDim < numSourceDims; sourceDim++) {
-    if ((targetShape.empty() || targetShape.back() != ShapedType::kDynamic) &&
-        sourceShape[sourceDim] != ShapedType::kDynamic &&
-        sourceShape[sourceDim] != 1)
+  // entries in the source shape explicitly.
+  for (; sourceDimIdx < numSourceDims; sourceDimIdx++) {
+    const bool isOne = sourceShape[sourceDimIdx] == 1,
+               isDynamic = sourceShape[sourceDimIdx] == ShapedType::kDynamic;
+    if (targetShape.empty()) {
+      if (!isOne && !isDynamic)
+        return std::nullopt;
+      continue;
+    }
+    // If the last 2 dimensions in the target were dynamic, the tail in the
+    // source shape cannot contain a dynamic value. E.g. ?x?->? is valid,
+    // however ?x?x10x?->?x? would be indeterminate.
+    if (wasLastDimDynamic && numTargetDims > 1 &&
+        targetShape[numTargetDims - 2] == ShapedType::kDynamic) {
+      if (isDynamic)
+        return std::nullopt;
+    }
+    // If the last target dimension is static, only source dimensions of 1 are
+    // acceptable.
+    if (!wasLastDimDynamic && !isOne)
       return std::nullopt;
-    // The map is empty when the target type is a scalar.
-    if (!reassociationMap.empty())
-      reassociationMap.back().push_back(sourceDim);
+    assert(!reassociationMap.empty());
+    reassociationMap.back().push_back(sourceDimIdx);
   }
   return reassociationMap;
 }
