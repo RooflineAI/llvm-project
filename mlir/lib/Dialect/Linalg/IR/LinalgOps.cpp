@@ -52,6 +52,7 @@
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cassert>
+#include <cstdint>
 #include <optional>
 
 using namespace mlir;
@@ -1338,11 +1339,97 @@ struct EraseIdentityLinalgOp : public OpRewritePattern<OpTy> {
   }
 };
 
+struct ScalarizeSingleElementConstants : public OpRewritePattern<GenericOp> {
+  using OpRewritePattern<GenericOp>::OpRewritePattern;
+
+  static bool isScalarOperand(Value operand) {
+    return isa<OpResult>(operand) &&
+           isa<arith::ConstantOp>(operand.getDefiningOp()) &&
+           isa<RankedTensorType>(operand.getType()) &&
+           (cast<RankedTensorType>(operand.getType()).getNumElements() == 1);
+  }
+
+  static arith::ConstantOp
+  createScalarValueFromRankedType(arith::ConstantOp constant,
+                                  PatternRewriter &rewriter) {
+    auto denseAttr = dyn_cast<DenseElementsAttr>(constant.getValueAttr());
+    arith::ConstantOp splatConstantOp(nullptr);
+    if (denseAttr && denseAttr.isSplat()) {
+      splatConstantOp =
+          llvm::TypeSwitch<Attribute, arith::ConstantOp>(
+              denseAttr.getSplatValue<Attribute>())
+              .Case([&](IntegerAttr attr) {
+                return rewriter.create<arith::ConstantOp>(constant.getLoc(),
+                                                          attr);
+              })
+              .Case([&](FloatAttr attr) {
+                return rewriter.create<arith::ConstantOp>(constant.getLoc(),
+                                                          attr);
+              })
+              .Default([](Attribute /*attr*/) -> arith::ConstantOp {
+                return nullptr;
+              });
+    }
+    return splatConstantOp;
+  }
+
+  LogicalResult matchAndRewrite(GenericOp linalgOp,
+                                PatternRewriter &rewriter) const override {
+    // Iterate over the operands and see if there are any ranked constants with
+    // size one that can simply be converted to a "rankless" scalar.
+    llvm::MapVector<int64_t, arith::ConstantOp> operandsToChange;
+    for (auto [idx, operand] : llvm::enumerate(linalgOp.getInputs())) {
+      if (!isScalarOperand(operand)) {
+        continue;
+      }
+      auto constant = cast<arith::ConstantOp>(operand.getDefiningOp());
+      auto splatConstantOp =
+          createScalarValueFromRankedType(constant, rewriter);
+      if (!splatConstantOp) {
+        std::ignore = rewriter.notifyMatchFailure(
+            operand.getLoc(), "cannot extract splat value from constant");
+        continue;
+      }
+      operandsToChange[idx] = splatConstantOp;
+    }
+
+    if (operandsToChange.empty()) {
+      return rewriter.notifyMatchFailure(
+          linalgOp, "does not have scalar operands in RankedTensorTypes");
+    }
+
+    // Update the operands and indexing maps with the new constants. The
+    // indexing maps will be changed to be rankless instead of constant
+    // expression.
+    SmallVector<Value> newOperands(linalgOp.getInputs());
+    SmallVector<AffineMap> newIndexingMaps(linalgOp.getIndexingMapsArray());
+    for (auto [idx, newConstantOp] : operandsToChange) {
+      AffineMap indexing = newIndexingMaps[idx];
+      newIndexingMaps[idx] =
+          AffineMap::get(indexing.getNumDims(), /*symbolCount*/ 0,
+                         SmallVector<AffineExpr>(), rewriter.getContext());
+      newOperands[idx] = newConstantOp;
+    }
+
+    // Create the modified generic and replace.
+    GenericOp replacementOp = rewriter.create<GenericOp>(
+        linalgOp.getLoc(), linalgOp.getResultTensors().getTypes(),
+        ValueRange(newOperands), SmallVector<Value>(linalgOp.getOutputs()),
+        newIndexingMaps, linalgOp.getIteratorTypesArray());
+    rewriter.inlineRegionBefore(linalgOp.getRegion(), replacementOp.getRegion(),
+                                replacementOp.getRegion().begin());
+    rewriter.replaceOp(linalgOp, replacementOp.getResultTensors());
+
+    return success();
+  }
+};
+
 } // namespace
 
 void GenericOp::getCanonicalizationPatterns(RewritePatternSet &results,
                                             MLIRContext *context) {
   results.add<EraseIdentityLinalgOp<GenericOp>>(context);
+  results.add<ScalarizeSingleElementConstants>(context);
 }
 
 LogicalResult GenericOp::fold(FoldAdaptor, SmallVectorImpl<OpFoldResult> &) {
