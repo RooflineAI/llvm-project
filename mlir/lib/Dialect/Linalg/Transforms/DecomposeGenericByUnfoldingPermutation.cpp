@@ -10,6 +10,7 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include <map>
+#include <mlir/IR/BuiltinAttributes.h>
 #include <optional>
 #include <utility>
 
@@ -166,6 +167,11 @@ LogicalResult DecomposeProjectedPermutation::matchAndRewrite(
   // out which operand can supply that runtime-value (tensor.dim).
   // Leaving it as a future TODO.
   if (llvm::any_of(op->getOpOperands(), [](OpOperand &oper) {
+        // The following rewrite pattern only reasons on RankedTensorTypes
+        // If that is not the case, then we cannot reason on the shape.
+        if (!isa<RankedTensorType>(oper.get().getType())) {
+          return false;
+        }
         auto opType = cast<RankedTensorType>(oper.get().getType());
         return ShapedType::isDynamicShape(opType.getShape());
       }))
@@ -181,6 +187,9 @@ LogicalResult DecomposeProjectedPermutation::matchAndRewrite(
   // Walk over each input operand and unfold if it is transposed, broadcast
   // or mix of two via operand's affine-map.
   for (int64_t i = 0; i < op.getNumDpsInputs(); ++i) {
+    if (!isa<RankedTensorType>(newInitValues[i].getType())) {
+      continue;
+    }
     auto &map = newMap[i];
     auto inputRTType = cast<RankedTensorType>(newInitValues[i].getType());
     auto elType = inputRTType.getElementType();
