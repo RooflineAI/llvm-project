@@ -243,6 +243,10 @@ bool getConstShapeValues(Operation *op,
 // returns a small vector of int64_t values that attr contains
 SmallVector<int64_t> convertFromIntAttr(const DenseElementsAttr &attr,
                                         const int rank);
+
+// Returns the attribute that stores the constant value of a ConstantLike
+// operation. Prerequisite is `op` to be a `ConstantLike` operation.
+Attribute getConstantAttribute(Operation *op);
 } // namespace tosa
 } // namespace mlir
 

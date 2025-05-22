@@ -23,10 +23,11 @@
 #include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
-#include "mlir/Interfaces/InferTypeOpInterface.h"
+#include "llvm/ADT/TypeSwitch.h"
 
 #include <numeric>
 #include <type_traits>
@@ -118,6 +119,71 @@ static AffineMap getBroadcastingMap(PatternRewriter &rewriter, Value source,
                         /*symbolCount=*/0, sourceDims, rewriter.getContext());
 }
 
+static mlir::Value createScalarConstantFromTensor(PatternRewriter &rewriter,
+                                                  Operation *source,
+                                                  Value result) {
+  // Get the constant as the attribute from the constant operation
+  Attribute value = tosa::getConstantAttribute(source);
+  auto attr = dyn_cast<SplatElementsAttr>(value);
+
+  // Ensure the constant is splat so we can convert to a scalar
+  if (!attr) {
+    return Value();
+  }
+
+  // Filter for constants based on Ranked Tensors
+  auto resultTy = dyn_cast<RankedTensorType>(result.getType());
+  if (!resultTy) {
+    return Value();
+  }
+
+  // Create a scalar constant with the same type as the result tensor.
+  // We assume the ResultType follows the TOSA spec, in that it can be an
+  // accumulator type that is same as or larger in bitwidth than the splat
+  // constant.
+  Value scalarValue =
+      llvm::TypeSwitch<Attribute, Value>(attr.getSplatValue<Attribute>())
+          .Case([&](FloatAttr attr) {
+            return rewriter
+                // Create a float constant with the same type as the result
+                // tensor and use the host systems double type as APFloat
+                // checks bitwidths so in the case of different input -> output
+                // types the conversion will fail.
+                .create<arith::ConstantOp>(
+                    source->getLoc(),
+                    FloatAttr::get(resultTy.getElementType(),
+                                   attr.getValue().convertToDouble()))
+                .getResult();
+          })
+          .Case([&](IntegerAttr attr) {
+            // At the moment all profiles are signed, so for the unsigned case
+            // if it does happen bail out.
+            if (resultTy.getElementType().isUnsignedInteger()) {
+              return Value();
+            }
+            // Create a scalar that follows the result type. In the case of i8,
+            // the result can be i32. So we perform the conversion at
+            // compile-time.
+            return rewriter
+                .create<arith::ConstantOp>(
+                    source->getLoc(),
+                    IntegerAttr::get(resultTy.getElementType(),
+                                     attr.getValue().getSExtValue()))
+                .getResult();
+          })
+          .Default([](Attribute) { return Value(); });
+
+  // Could not create a scalar constant due to an unsupported type
+  if (!scalarValue) {
+    return Value();
+  }
+
+  return rewriter
+      .create<linalg::FillOp>(source->getLoc(), ValueRange{scalarValue},
+                              ValueRange{result})
+      .getResult(0);
+}
+
 // Broadcast the source value to all the outer dimensions of the result value.
 // If required, the element type is expanded using an arith.extsi or arith.extf
 // operation as appropriate.
@@ -126,6 +192,17 @@ static mlir::Value linalgBroadcastAndMaybeExt(PatternRewriter &rewriter,
                                               Value result) {
   ShapedType resultTy = cast<ShapedType>(result.getType());
   const int64_t resultRank = resultTy.getRank();
+
+  // Attempt to create a FillOp in linalg if the constant is a splat value.
+  if (source.getDefiningOp() &&
+      matchPattern(source.getDefiningOp(), m_Constant())) {
+    auto scalar = createScalarConstantFromTensor(
+        rewriter, source.getDefiningOp(), result);
+    if (scalar) {
+      return scalar;
+    }
+  }
+
   // Creating maps for the input and output of the broacast-like generic op.
   SmallVector<AffineMap, 2> indexingMaps;
   indexingMaps.push_back(getBroadcastingMap(rewriter, source, result));
