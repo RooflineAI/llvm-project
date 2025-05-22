@@ -28,6 +28,10 @@
 
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 
+#include <llvm/ADT/TypeSwitch.h>
+#include <mlir/IR/Attributes.h>
+#include <mlir/IR/BuiltinAttributes.h>
+#include <mlir/IR/Value.h>
 #include <numeric>
 #include <type_traits>
 
@@ -126,6 +130,39 @@ static mlir::Value linalgBroadcastAndMaybeExt(PatternRewriter &rewriter,
                                               Value result) {
   ShapedType resultTy = cast<ShapedType>(result.getType());
   const int64_t resultRank = resultTy.getRank();
+
+  if (isa<OpResult>(source) && isa<arith::ConstantOp>(source.getDefiningOp())) {
+    auto constantSource = cast<arith::ConstantOp>(source.getDefiningOp());
+    auto attr = dyn_cast<SplatElementsAttr>(constantSource.getValue());
+    if (attr) {
+      Value scalarValue =
+          llvm::TypeSwitch<Attribute, Value>(attr.getSplatValue<Attribute>())
+              .Case([&](FloatAttr attr) {
+                return rewriter.create<arith::ConstantOp>(source.getLoc(), attr)
+                    .getResult();
+              })
+              .Case([&](IntegerAttr attr) {
+                return rewriter.create<arith::ConstantOp>(source.getLoc(), attr)
+                    .getResult();
+              })
+              .Default([](Attribute) { return Value(); });
+      // Need to add dynamic dims to this op. Use the helper in this file.
+      auto dynamicDimsOr =
+          checkHasDynamicBatchDims(rewriter, result.getDefiningOp(), {result});
+      if (!dynamicDimsOr.has_value())
+        return Value();
+      SmallVector<Value> dynamicDims = *dynamicDimsOr;
+
+      Value emptyTensor = rewriter.create<tensor::EmptyOp>(
+          source.getLoc(), resultTy.getShape(), resultTy.getElementType(),
+          dynamicDims);
+      return rewriter
+          .create<linalg::FillOp>(source.getLoc(), ValueRange{scalarValue},
+                                  ValueRange{emptyTensor})
+          .getResult(0);
+    }
+  }
+
   // Creating maps for the input and output of the broacast-like generic op.
   SmallVector<AffineMap, 2> indexingMaps;
   indexingMaps.push_back(getBroadcastingMap(rewriter, source, result));
