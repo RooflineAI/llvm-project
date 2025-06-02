@@ -248,3 +248,21 @@ func.func @pack_with_unit_outer_dims_and_unit_inner(%arg0: tensor<1x1x4xf32>, %a
 // CHECK:         %[[INSERT:.+]] = tensor.insert_slice %[[TRANSP]] into %[[DEST]]
 // CHECK-SAME:      [0, 0, 0, 0, 0] [1, 1, 1, 4, 1] [1, 1, 1, 1, 1] : tensor<1x4x1xf32> into tensor<1x1x1x4x1xf32>
 // CHECK:         return %[[INSERT]]
+
+// -----
+
+func.func @pack_with_unit_outer_dims_and_non_adjacent_inner(%arg0: tensor<4x1x3xf32>, %arg1: tensor<1x1x1x3x4xf32>) -> tensor<1x1x1x3x4xf32> {
+  %pack = linalg.pack %arg0 outer_dims_perm = [1, 2, 0]  inner_dims_pos = [2, 0] inner_tiles = [3, 4] into %arg1 : tensor<4x1x3xf32> -> tensor<1x1x1x3x4xf32>
+  return %pack : tensor<1x1x1x3x4xf32>
+}
+// CHECK-LABEL: func.func @pack_with_unit_outer_dims_and_non_adjacent_inner
+// CHECK-SAME:    %[[SRC:[a-zA-Z0-9]+]]
+// CHECK-SAME:    %[[DEST:[a-zA-Z0-9]+]]
+// CHECK:         %[[EMPTY:.+]] = tensor.empty() : tensor<1x3x4xf32>
+// CHECK:         %[[TRANSP:.+]] = linalg.transpose
+// CHECK-SAME:      ins(%[[SRC]] : tensor<4x1x3xf32>)
+// CHECK-SAME:      outs(%[[EMPTY]] : tensor<1x3x4xf32>)
+// CHECK-SAME:      permutation = [1, 2, 0]
+// CHECK:         %[[INSERT:.+]] = tensor.insert_slice %[[TRANSP]] into %[[DEST]]
+// CHECK-SAME:      [0, 0, 0, 0, 0] [1, 1, 1, 3, 4] [1, 1, 1, 1, 1] : tensor<1x3x4xf32> into tensor<1x1x1x3x4xf32>
+// CHECK:         return %[[INSERT]]

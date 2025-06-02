@@ -1160,8 +1160,6 @@ LogicalResult DecomposeOuterUnitDimsPackOpPattern::matchAndRewrite(
   Location loc = packOp.getLoc();
 
   Value input = getPackOpSourceOrPaddedSource(rewriter, packOp);
-  DenseMap<int64_t, OpFoldResult> dimAndTileMapping =
-      packOp.getDimAndTileMapping();
   int64_t srcRank = packOp.getSourceRank();
   int64_t destRank = packOp.getDestRank();
   int64_t numTiles = destRank - srcRank;
@@ -1174,18 +1172,21 @@ LogicalResult DecomposeOuterUnitDimsPackOpPattern::matchAndRewrite(
         packOp, "Attempting to tile non-trailing source dims!");
 
   // 1. Extract the inner tile sizes.
-  // Where possible, values are replaced with constant attributes (to match the
-  // behaviour of `getPackOpSourceOrPaddedSource`).
+  //    Use the tile sizes as defined in the operation. As all the outer
+  //    dimensions are 1 and by definition the last `k` dimensions of the
+  //    destination tensor (packed tensor) will be the tile sizes, we can simply
+  //    use the tiles for calculating our transpose permutations.
+  //
+  //    Where possible, values are replaced with constant attributes (to match
+  //    the behaviour of `getPackOpSourceOrPaddedSource`).
   SmallVector<OpFoldResult> tileSizes;
-  for (auto i : llvm::seq<unsigned>(0, srcRank)) {
-    if (dimAndTileMapping.count(i)) {
-      // Rather than taking the tile size as is, extact the actual constant
-      // value Attribute where possible, e.g.:
-      //    [Value: %tile_size = arith.constant 8 : index] --> [Attribute: 8]
-      auto [_, tileSize] =
-          getSimplifiedOfrAndStaticSizePair(dimAndTileMapping[i], rewriter);
-      tileSizes.push_back(tileSize);
-    }
+  for (const OpFoldResult &tileSizeDef : packOp.getMixedTiles()) {
+    // Rather than taking the tile size as is, extract the actual constant
+    // value Attribute where possible, e.g.:
+    //    [Value: %tile_size = arith.constant 8 : index] --> [Attribute: 8]
+    auto [_, tileSize] =
+        getSimplifiedOfrAndStaticSizePair(tileSizeDef, rewriter);
+    tileSizes.push_back(tileSize);
   }
 
   // 2. Transpose the input to match the inner tile order:
@@ -1218,9 +1219,6 @@ LogicalResult DecomposeOuterUnitDimsPackOpPattern::matchAndRewrite(
   SmallVector<OpFoldResult> transShapeForEmptyOp(srcRank - numTiles,
                                                  oneIdxAttr);
   transShapeForEmptyOp.append(tileSizes);
-
-  applyPermutationToVector<OpFoldResult>(transShapeForEmptyOp,
-                                         srcPermForTranspose);
   Value empty = rewriter.create<tensor::EmptyOp>(
       loc, transShapeForEmptyOp, packOp.getSourceType().getElementType());
 
@@ -1233,8 +1231,7 @@ LogicalResult DecomposeOuterUnitDimsPackOpPattern::matchAndRewrite(
   SmallVector<OpFoldResult> writeStrides(destRank, oneIdxAttr);
   SmallVector<OpFoldResult> writeOffsets(destRank, zeroIdxAttr);
   // Outer dims are all 1s!
-  SmallVector<OpFoldResult> writeSizes(destRank - dimAndTileMapping.size(),
-                                       oneIdxAttr);
+  SmallVector<OpFoldResult> writeSizes(destRank - numTiles, oneIdxAttr);
   SmallVector<int64_t> writeShape;
 
   for (auto tileSize : packOp.getMixedTiles()) {
