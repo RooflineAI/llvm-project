@@ -166,7 +166,14 @@ LogicalResult DecomposeProjectedPermutation::matchAndRewrite(
   // out which operand can supply that runtime-value (tensor.dim).
   // Leaving it as a future TODO.
   if (llvm::any_of(op->getOpOperands(), [](OpOperand &oper) {
-        auto opType = cast<RankedTensorType>(oper.get().getType());
+        // Allow scalar values as these can be broadcasted on the input.
+        if (oper.get().getType().isIntOrFloat())
+          return false;
+        // If any of the operands are not a RankedTensorType, then we should
+        // return early. The pattern has been built with RankedTensors in mind.
+        if (!isa<RankedTensorType>(oper.get().getType()))
+          return true;
+        auto opType = cast<ShapedType>(oper.get().getType());
         return ShapedType::isDynamicShape(opType.getShape());
       }))
     return failure();
@@ -181,10 +188,27 @@ LogicalResult DecomposeProjectedPermutation::matchAndRewrite(
   // Walk over each input operand and unfold if it is transposed, broadcast
   // or mix of two via operand's affine-map.
   for (int64_t i = 0; i < op.getNumDpsInputs(); ++i) {
-    auto &map = newMap[i];
-    auto inputRTType = cast<RankedTensorType>(newInitValues[i].getType());
-    auto elType = inputRTType.getElementType();
+    auto inputType = newInitValues[i].getType();
+    SmallVector<int64_t> inputShape =
+        llvm::TypeSwitch<Type, SmallVector<int64_t>>(inputType)
+            .Case([](RankedTensorType tensor) { return tensor.getShape(); })
+            .Case([](FloatType scalar) { return SmallVector<int64_t>({1}); })
+            .Case([](IntegerType scalar) { return SmallVector<int64_t>({1}); })
+            .Default([](Type) { return SmallVector<int64_t>(); });
 
+    Type elType = llvm::TypeSwitch<Type, Type>(inputType)
+                      .Case([](RankedTensorType tensor) {
+                        return tensor.getElementType();
+                      })
+                      .Case([](FloatType scalar) { return scalar; })
+                      .Case([](IntegerType scalar) { return scalar; })
+                      .Default([](Type) { return Type(); });
+
+    // If we were not able to result the information skip.
+    if (inputShape.empty() || !elType)
+      continue;
+
+    auto &map = newMap[i];
     /// Nothing to do if map is already an identity.
     if (map.isIdentity())
       continue;
@@ -197,7 +221,7 @@ LogicalResult DecomposeProjectedPermutation::matchAndRewrite(
       /// rule: dim(result, i) = dim(input, permutation[i])
       SmallVector<int64_t> transposedShape(map.getNumResults());
       for (int64_t i = 0; i < map.getNumResults(); ++i)
-        transposedShape[i] = inputRTType.getShape()[permutation[i]];
+        transposedShape[i] = inputShape[permutation[i]];
 
       Value emptyTensor =
           rewriter.create<tensor::EmptyOp>(loc, transposedShape, elType);
@@ -211,13 +235,23 @@ LogicalResult DecomposeProjectedPermutation::matchAndRewrite(
     // Does it require broadcast?
     if (!broadcastedDims.empty()) {
       assert(broadcastedDims.size() && "should have non size broadcast");
-      Value emptyTensor = rewriter.create<tensor::EmptyOp>(
-          loc, outputShape, inputRTType.getElementType());
+      Value emptyTensor =
+          rewriter.create<tensor::EmptyOp>(loc, outputShape, elType);
 
-      auto broadcastOp = rewriter.create<linalg::BroadcastOp>(
-          loc, newInitValues[i], emptyTensor, broadcastedDims);
+      Value source = newInitValues[i];
+      Value result;
+      // If a scalar is being broadcasted we can simply use a fill operation.
+      if (source.getType().isIntOrFloat()) {
+        result = rewriter.create<linalg::FillOp>(loc, source, emptyTensor)
+                     ->getResult(0);
+      } else {
+        result = rewriter
+                     .create<linalg::BroadcastOp>(loc, source, emptyTensor,
+                                                  broadcastedDims)
+                     ->getResult(0);
+      }
 
-      newInitValues[i] = broadcastOp->getResult(0);
+      newInitValues[i] = result;
       isChanged = true;
     }
     newMap[i] = rewriter.getMultiDimIdentityMap(map.getNumDims());
