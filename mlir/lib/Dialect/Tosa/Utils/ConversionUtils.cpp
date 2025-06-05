@@ -213,3 +213,23 @@ mlir::tosa::convertFromIntAttr(const DenseElementsAttr &attr, const int rank) {
   }
   return {};
 }
+
+Attribute mlir::tosa::getConstantAttribute(Operation *op) {
+
+  if (!op || !op->hasTrait<OpTrait::ConstantLike>())
+    return Attribute();
+
+  if (auto constOp = dyn_cast<ConstOp>(op)) {
+    return constOp.getValues();
+  }
+
+  // TOSA names constants in the operation as "value" while linalg names them
+  // with "values". Here we search for both and find the first.
+  const SmallVector<const char *> possibleAttributes = {"value", "values"};
+  for (llvm::StringRef name : possibleAttributes) {
+    if (op->hasAttr(name)) {
+      return op->getAttr(name);
+    }
+  }
+  return Attribute();
+}

@@ -672,6 +672,63 @@ func.func @conv2d_f16_f32_acc(%input: tensor<1x49x42x27xf16>, %weights: tensor<2
 
 // -----
 
+// CHECK-LABEL: @conv2d_bias_broadcast_f32
+func.func @conv2d_bias_broadcast_f32(%input: tensor<1x49x42x27xf32>, %weights: tensor<28x3x3x27xf32>) -> () {
+  %bias = "tosa.const"() <{values = dense<4.20> : tensor<28xf32>}> : () -> tensor<28xf32>
+  // CHECK-DAG:     %[[CST:.+]] = arith.constant 4.200000e+00  : f32
+  // CHECK-DAG:     %[[EMPTY:.+]] = tensor.empty() : tensor<1x45x40x28xf32>
+  // CHECK:         %[[BIAS:.+]] = linalg.fill
+  // CHECK-SAME:                    ins(%[[CST]]
+  // CHECK-SAME:                    outs(%[[EMPTY]]{{.+}} -> tensor<1x45x40x28xf32>
+  // CHECK:         %[[CONV:.+]] = linalg.conv_2d_nhwc_fhwc
+  // CHECK-SAME:                     outs(%[[BIAS]]
+  %input_zp = "tosa.const"() <{values = dense<0.0> : tensor<1xf32>}> : () -> tensor<1xf32>
+  %weight_zp = "tosa.const"() <{values = dense<0.0> : tensor<1xf32>}> : () -> tensor<1xf32>
+  %0 = tosa.conv2d %input, %weights, %bias, %input_zp, %weight_zp {acc_type = f32, pad = array<i64: 0, 0, 0, 0>, stride = array<i64: 1, 1>, dilation = array<i64: 2, 1>} : (tensor<1x49x42x27xf32>, tensor<28x3x3x27xf32>, tensor<28xf32>, tensor<1xf32>, tensor<1xf32>) -> tensor<1x45x40x28xf32>
+  return
+}
+
+// -----
+
+// CHECK-LABEL: @conv2d_dynamic_batch_bias_broadcast_f32
+// CHECK-SAME:    (%[[INPUT:.+]]: tensor<?x49x42x27xf32>
+func.func @conv2d_dynamic_batch_bias_broadcast_f32(%input: tensor<?x49x42x27xf32>, %weights: tensor<28x3x3x27xf32>) -> () {
+  %bias = "tosa.const"() <{values = dense<4.20> : tensor<28xf32>}> : () -> tensor<28xf32>
+  // CHECK:         %[[C0:.+]] = arith.constant 0 : index
+  // CHECK:         %[[DIM:.+]] = tensor.dim %[[INPUT]], %[[C0]] : tensor<?x49x42x27xf32>
+  // CHECK:         %[[EMPTY:.+]] = tensor.empty(%[[DIM]]) : tensor<?x45x40x28xf32>
+  // CHECK:         %[[CST:.+]] = arith.constant 4.200000e+00  : f32
+  // CHECK:         %[[BIAS:.+]] = linalg.fill
+  // CHECK-SAME:                    ins(%[[CST]]
+  // CHECK-SAME:                    outs(%[[EMPTY]]{{.+}} -> tensor<?x45x40x28xf32>
+  // CHECK:         %[[CONV:.+]] = linalg.conv_2d_nhwc_fhwc
+  // CHECK-SAME:                    outs(%[[BIAS]]
+  %input_zp = "tosa.const"() <{values = dense<0.0> : tensor<1xf32>}> : () -> tensor<1xf32>
+  %weight_zp = "tosa.const"() <{values = dense<0.0> : tensor<1xf32>}> : () -> tensor<1xf32>
+  %0 = tosa.conv2d %input, %weights, %bias, %input_zp, %weight_zp {acc_type = f32, pad = array<i64: 0, 0, 0, 0>, stride = array<i64: 1, 1>, dilation = array<i64: 2, 1>} : (tensor<?x49x42x27xf32>, tensor<28x3x3x27xf32>, tensor<28xf32>, tensor<1xf32>, tensor<1xf32>) -> tensor<?x45x40x28xf32>
+  return
+}
+
+// -----
+
+// CHECK-LABEL: @conv2d_bias_broadcast_i8_acc_i32
+func.func @conv2d_bias_broadcast_i8_acc_i32(%input: tensor<1x49x42x27xi8>, %weights: tensor<28x3x3x27xi8>) -> () {
+  %bias = "tosa.const"() <{values = dense<42> : tensor<28xi8>}> : () -> tensor<28xi8>
+  // CHECK-DAG:     %[[CST:.+]] = arith.constant 42  : i32
+  // CHECK-DAG:     %[[EMPTY:.+]] = tensor.empty() : tensor<1x45x40x28xi32>
+  // CHECK:         %[[BIAS:.+]] = linalg.fill
+  // CHECK-SAME:                    ins(%[[CST]]
+  // CHECK-SAME:                    outs(%[[EMPTY]]{{.+}} -> tensor<1x45x40x28xi32>
+  // CHECK:         %[[CONV:.+]] = linalg.conv_2d_nhwc_fhwc
+  // CHECK-SAME:                     outs(%[[BIAS]]
+  %input_zp = "tosa.const"() <{values = dense<0> : tensor<1xi8>}> : () -> tensor<1xi8>
+  %weight_zp = "tosa.const"() <{values = dense<0> : tensor<1xi8>}> : () -> tensor<1xi8>
+  %0 = tosa.conv2d %input, %weights, %bias, %input_zp, %weight_zp {acc_type = i32, pad = array<i64: 0, 0, 0, 0>, stride = array<i64: 1, 1>, dilation = array<i64: 2, 1>} : (tensor<1x49x42x27xi8>, tensor<28x3x3x27xi8>, tensor<28xi8>, tensor<1xi8>, tensor<1xi8>) -> tensor<1x45x40x28xi32>
+  return
+}
+
+// -----
+
 // CHECK: #[[$MAP0:.*]] = affine_map<(d0, d1, d2, d3) -> (d3)>
 // CHECK: #[[$MAP1:.*]] = affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
 
