@@ -158,7 +158,7 @@ def Builtin_DenseArrayRawDataParameter : ArrayRefParameter<
     if (!$_self.empty()) {
       auto *alloc = static_cast<char *>(
           $_allocator.allocate($_self.size(), alignof(uint64_t)));
-      std::uninitialized_copy($_self.begin(), $_self.end(), alloc);
+      llvm::uninitialized_copy($_self, alloc);
       $_dst = ArrayRef<char>(alloc, $_self.size());
     }
   }];
@@ -700,7 +700,7 @@ def Builtin_IntegerAttr : Builtin_Attr<"Integer", "integer",
     false // A bool, i.e. i1, value.
     ```
   }];
-  let parameters = (ins AttributeSelfTypeParameter<"">:$type, "APInt":$value);
+  let parameters = (ins AttributeSelfTypeParameter<"">:$type, APIntParameter<"">:$value);
   let builders = [
     AttrBuilderWithInferredContext<(ins "Type":$type,
                                         "const APInt &":$value), [{
